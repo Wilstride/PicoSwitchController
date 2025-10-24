@@ -4,6 +4,7 @@ add_executable(${PROJECT_NAME}
     main.cpp
     SwitchBluetooth.cpp
     CommandParser.cpp
+    FastLogger.cpp
 )
 
 target_include_directories(autoshine_pico_firmware PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../include)

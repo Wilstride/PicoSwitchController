@@ -15,11 +15,28 @@ class SwitchBluetooth {
   void set_controller_rumble(bool rumble);
   
   // Button control methods
-  void press_button(const char* button);
-  void release_button(const char* button);
-  void release_all_buttons();
+  void set_button(const char* button, bool pressed);
   void set_stick(const char* stick, float h, float v);
-  void center_sticks();
+  
+  // Direct state modification (used internally by queue processor)
+  void set_button_direct(const char* button, bool pressed);
+  void set_stick_direct(const char* stick, float h, float v);
+  
+  // Bluetooth timing control
+  bool can_send_hid_report();
+  void mark_report_sent();
+  bool has_pending_update() { return _pending_report_update; }
+  bool has_config_request() { return _switchRequestReport[10] != 0x00; }
+  bool is_paired() { return _device_info_queried; }
+  void wait_for_hid_transmission();
+  
+  // Command queue and frame consolidation
+  void start_consolidation();
+  void end_consolidation();
+  void queue_button_command(const char* button, bool pressed);
+  void queue_stick_command(const char* stick, float h, float v);
+  void process_command_queue();
+  bool has_queued_commands();
 
  private:
   uint16_t _hid_cid = 0;
@@ -36,6 +53,29 @@ class SwitchBluetooth {
   bool _device_info_queried = false;
   uint32_t _timer = 0;
   uint32_t _timestamp = 0;
+  
+  // Bluetooth timing control for 125Hz HID rate (8ms intervals)
+  uint32_t _last_hid_report_time = 0;
+  bool _pending_report_update = false;
+  
+  // Command queue system for reliable frame consolidation
+  struct QueuedCommand {
+    enum Type { BUTTON_PRESS, BUTTON_RELEASE, STICK_SET } type;
+    char button_name[16];
+    bool pressed;
+    float stick_h, stick_v;
+  };
+  
+  static const int MAX_QUEUE_SIZE = 32;
+  QueuedCommand _command_queue[MAX_QUEUE_SIZE];
+  volatile int _queue_head = 0;
+  volatile int _queue_tail = 0;
+  volatile bool _queue_full = false;
+  
+  // Frame consolidation system
+  bool _consolidation_active = false;
+  uint32_t _consolidation_start_time = 0;
+  static const uint32_t CONSOLIDATION_WINDOW_MS = 3; // 3ms window for command consolidation
   
   // Helper methods (from SwitchCommon)
   void set_empty_report();

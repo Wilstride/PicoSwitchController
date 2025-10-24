@@ -3,6 +3,7 @@
 
 #include "SwitchBluetooth.h"
 #include "CommandParser.h"
+#include "FastLogger.h"
 #include "pico/stdlib.h"
 #include "btstack.h"
 
@@ -28,43 +29,58 @@ static void hid_report_data_callback_wrapper(uint16_t cid,
 }
 
 void process_serial_commands() {
-    static char line_buffer[256];
+    static char line_buffer[128]; // Reduced buffer size
     static int buffer_pos = 0;
     
-    int c = getchar_timeout_us(0); // Non-blocking read
-    if (c == PICO_ERROR_TIMEOUT) {
-        return; // No data available
+    // Update non-blocking sleep state
+    commandParser->update_sleep_state();
+    
+    // Skip command processing if we're in a sleep state
+    if (commandParser->is_sleeping()) {
+        return;
     }
     
-    if (c == '\n' || c == '\r') {
-        if (buffer_pos > 0) {
-            line_buffer[buffer_pos] = '\0';
-            
-            printf("Executing command: %s\n", line_buffer);
-            
-            if (!commandParser->parse_and_execute(line_buffer)) {
-                printf("Command failed: %s\n", line_buffer);
-            } else {
-                printf("OK\n");
+    // Process multiple characters per call to reduce overhead
+    for (int i = 0; i < 16; i++) { // Process up to 16 chars at once
+        int c = getchar_timeout_us(0); // Non-blocking read
+        if (c == PICO_ERROR_TIMEOUT) {
+            break; // No more data available
+        }
+        
+        if (c == '\n' || c == '\r') {
+            if (buffer_pos > 0) {
+                line_buffer[buffer_pos] = '\0';
+                
+                // Execute command - timing is now handled in SwitchBluetooth
+                commandParser->parse_and_execute(line_buffer);
+                
+                buffer_pos = 0;
             }
-            
+        } else if (buffer_pos < sizeof(line_buffer) - 1) {
+            line_buffer[buffer_pos++] = c;
+        } else {
+            // Buffer overflow - reset silently
             buffer_pos = 0;
         }
-    } else if (buffer_pos < sizeof(line_buffer) - 1) {
-        line_buffer[buffer_pos++] = c;
-    } else {
-        // Buffer overflow - reset
-        printf("Command too long, resetting buffer\n");
-        buffer_pos = 0;
     }
 }
 
 static void serial_timer_handler(btstack_timer_source_t *ts) {
-    // Process serial commands
+    // Process serial commands with minimal latency
     process_serial_commands();
     
-    // Reschedule timer for next check (every 1ms)
-    btstack_run_loop_set_timer(ts, 1);
+    // Process any remaining queued commands for reliability
+    if (switchController && switchController->has_queued_commands()) {
+        switchController->process_command_queue();
+    }
+    
+    // Flush logs non-blocking way (only when there's time)
+    if (FastLogger::has_pending_logs()) {
+        FastLogger::flush_logs();
+    }
+    
+    // Reschedule timer for next check - 1ms for maximum responsiveness
+    btstack_run_loop_set_timer(ts, 1);  // 1ms intervals for ultra-fast command processing
     btstack_run_loop_add_timer(ts);
 }
 
@@ -72,13 +88,12 @@ int main() {
   // Initialize stdio USB for serial communication
   stdio_init_all();
   
-  // Give USB some time to initialize properly
-  sleep_ms(1000);
+  // Initialize fast logging system
+  FastLogger::init();
   
-  printf("Autoshine Pico Firmware Starting...\n");
-  
-  // Give another moment for USB to stabilize
-  sleep_ms(500);
+  // Non-blocking initialization - remove delays that interfere with command processing
+  // USB will initialize in background while we start Bluetooth stack
+  FastLogger::log("Autoshine Pico Firmware Starting...");
   
   // Initialize Switch controller
   switchController = new SwitchBluetooth();
@@ -86,7 +101,7 @@ int main() {
   
   switchController->init();
   
-  printf("Bluetooth controller initialized\n");
+  FastLogger::log("Bluetooth controller initialized");
   
   hci_event_callback_registration.callback = &packet_handler_wrapper;
   hci_add_event_handler(&hci_event_callback_registration);
@@ -94,25 +109,23 @@ int main() {
   hid_device_register_packet_handler(&packet_handler_wrapper);
   hid_device_register_report_data_callback(&hid_report_data_callback_wrapper);
 
-  // Set up periodic timer for serial command processing
+  // Set up periodic timer for serial command processing - ultra-fast 1ms intervals
   serial_timer.process = &serial_timer_handler;
-  btstack_run_loop_set_timer(&serial_timer, 1);  // 1ms interval
+  btstack_run_loop_set_timer(&serial_timer, 1);  // Start after 1ms 
   btstack_run_loop_add_timer(&serial_timer);
 
   // turn on!
   hci_power_control(HCI_POWER_ON);
   
-  printf("Bluetooth stack started. Waiting for commands over USB serial...\n");
-  printf("Available commands:\n");
-  printf("  PRESS <button>      - Press and release a button (a, b, x, y, l, r, zl, zr, plus, minus, home, capture, l_stick, r_stick, dpad_up, dpad_down, dpad_left, dpad_right)\n");
-  printf("  HOLD <button>       - Hold a button down (without releasing)\n");
-  printf("  RELEASE <button>    - Release a button\n");
-  printf("  STICK <stick> <h> <v> - Set stick position (-1.0 to 1.0)\n");
-  printf("  SLEEP <seconds>     - Sleep for specified duration\n");
-  printf("  CENTER_STICKS       - Center both analog sticks\n");
-  printf("  RELEASE_ALL         - Release all buttons\n");
-  printf("  # comment           - Comment line (ignored)\n");
-  printf("\nReady for commands...\n");
+  FastLogger::log("Bluetooth stack started. Waiting for commands over USB serial...");
+  FastLogger::log("Available commands:");
+  FastLogger::log("  PRESS <button>      - Press and release a button");
+  FastLogger::log("  HOLD <button>       - Hold a button down (without releasing)");
+  FastLogger::log("  RELEASE <button>    - Release a button");  
+  FastLogger::log("  STICK <stick> <h> <v> - Set stick position (-1.0 to 1.0)");
+  FastLogger::log("  SLEEP <seconds>     - Sleep for specified duration");
+  FastLogger::log("  # comment           - Comment line (ignored)");
+  FastLogger::log("Ready for commands...");
 
   // Enter BTStack main event loop (this blocks)
   btstack_run_loop_execute();

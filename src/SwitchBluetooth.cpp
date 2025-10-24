@@ -1,6 +1,7 @@
 #define __BTSTACK_FILE__ "SwitchBluetooth.cpp"
 
 #include "SwitchBluetooth.h"
+#include "FastLogger.h"
 
 #include <inttypes.h>
 #include <stdint.h>
@@ -21,6 +22,17 @@ static const char hid_device_name[] = "Wireless Gamepad";
 
 void SwitchBluetooth::init() {
   _switchReport.batteryConnection = 0x80;
+  
+  // Initialize Bluetooth timing control
+  _last_hid_report_time = 0;
+  _pending_report_update = false;
+  
+  // Initialize command queue
+  _queue_head = 0;
+  _queue_tail = 0;
+  _queue_full = false;
+  _consolidation_active = false;
+  
   bd_addr_t newAddr = {0x7c,
                        0xbb,
                        0x8a,
@@ -51,88 +63,235 @@ void SwitchBluetooth::init() {
                   switch_bt_report_descriptor);
 }
 
-// Button control methods
-void SwitchBluetooth::press_button(const char* button) {
-    if (strcmp(button, "a") == 0) {
-        _switchReport.buttons[0] |= SWITCH_MASK_A;
-    } else if (strcmp(button, "b") == 0) {
-        _switchReport.buttons[0] |= SWITCH_MASK_B;
-    } else if (strcmp(button, "x") == 0) {
-        _switchReport.buttons[0] |= SWITCH_MASK_X;
-    } else if (strcmp(button, "y") == 0) {
-        _switchReport.buttons[0] |= SWITCH_MASK_Y;
-    } else if (strcmp(button, "l") == 0) {
-        _switchReport.buttons[2] |= SWITCH_MASK_L;
-    } else if (strcmp(button, "r") == 0) {
-        _switchReport.buttons[0] |= SWITCH_MASK_R;
-    } else if (strcmp(button, "zl") == 0) {
-        _switchReport.buttons[2] |= SWITCH_MASK_ZL;
-    } else if (strcmp(button, "zr") == 0) {
-        _switchReport.buttons[0] |= SWITCH_MASK_ZR;
-    } else if (strcmp(button, "plus") == 0) {
-        _switchReport.buttons[1] |= SWITCH_MASK_PLUS;
-    } else if (strcmp(button, "minus") == 0) {
-        _switchReport.buttons[1] |= SWITCH_MASK_MINUS;
-    } else if (strcmp(button, "home") == 0) {
-        _switchReport.buttons[1] |= SWITCH_MASK_HOME;
-    } else if (strcmp(button, "capture") == 0) {
-        _switchReport.buttons[1] |= SWITCH_MASK_CAPTURE;
-    } else if (strcmp(button, "l_stick") == 0) {
-        _switchReport.buttons[1] |= SWITCH_MASK_L3;
-    } else if (strcmp(button, "r_stick") == 0) {
-        _switchReport.buttons[1] |= SWITCH_MASK_R3;
-    } else if (strcmp(button, "dpad_up") == 0) {
-        _switchReport.buttons[2] = (_switchReport.buttons[2] & 0xF0) | SWITCH_HAT_UP;
-    } else if (strcmp(button, "dpad_down") == 0) {
-        _switchReport.buttons[2] = (_switchReport.buttons[2] & 0xF0) | SWITCH_HAT_DOWN;
-    } else if (strcmp(button, "dpad_left") == 0) {
-        _switchReport.buttons[2] = (_switchReport.buttons[2] & 0xF0) | SWITCH_HAT_LEFT;
-    } else if (strcmp(button, "dpad_right") == 0) {
-        _switchReport.buttons[2] = (_switchReport.buttons[2] & 0xF0) | SWITCH_HAT_RIGHT;
+// Bluetooth timing control for 125Hz HID rate (8ms minimum interval)
+bool SwitchBluetooth::can_send_hid_report() {
+    uint32_t current_time = to_ms_since_boot(get_absolute_time());
+    return (current_time - _last_hid_report_time) >= 8; // 8ms = 125Hz
+}
+
+void SwitchBluetooth::mark_report_sent() {
+    _last_hid_report_time = to_ms_since_boot(get_absolute_time());
+    _pending_report_update = false;
+}
+
+void SwitchBluetooth::wait_for_hid_transmission() {
+    // Non-blocking wait - only check if enough time has passed
+    // Actual transmission timing is handled by the BTStack event system
+    // This eliminates blocking sleep calls that interfere with macro timing
+}
+
+void SwitchBluetooth::start_consolidation() {
+    _consolidation_active = true;
+    _consolidation_start_time = to_ms_since_boot(get_absolute_time());
+}
+
+void SwitchBluetooth::end_consolidation() {
+    _consolidation_active = false;
+    // Process all queued commands into a single frame
+    process_command_queue();
+}
+
+void SwitchBluetooth::queue_button_command(const char* button, bool pressed) {
+    if (_queue_full) {
+        FastLogger::log("Command queue full - dropping command");
+        return;
+    }
+    
+    // Add command to queue
+    QueuedCommand& cmd = _command_queue[_queue_tail];
+    cmd.type = pressed ? QueuedCommand::BUTTON_PRESS : QueuedCommand::BUTTON_RELEASE;
+    strncpy(cmd.button_name, button, sizeof(cmd.button_name) - 1);
+    cmd.button_name[sizeof(cmd.button_name) - 1] = '\0';
+    cmd.pressed = pressed;
+    
+    _queue_tail = (_queue_tail + 1) % MAX_QUEUE_SIZE;
+    if (_queue_tail == _queue_head) {
+        _queue_full = true;
+    }
+    
+    // If not consolidating, process immediately
+    if (!_consolidation_active) {
+        process_command_queue();
     }
 }
 
-void SwitchBluetooth::release_button(const char* button) {
-    if (strcmp(button, "a") == 0) {
-        _switchReport.buttons[0] &= ~SWITCH_MASK_A;
-    } else if (strcmp(button, "b") == 0) {
-        _switchReport.buttons[0] &= ~SWITCH_MASK_B;
-    } else if (strcmp(button, "x") == 0) {
-        _switchReport.buttons[0] &= ~SWITCH_MASK_X;
-    } else if (strcmp(button, "y") == 0) {
-        _switchReport.buttons[0] &= ~SWITCH_MASK_Y;
-    } else if (strcmp(button, "l") == 0) {
-        _switchReport.buttons[2] &= ~SWITCH_MASK_L;
-    } else if (strcmp(button, "r") == 0) {
-        _switchReport.buttons[0] &= ~SWITCH_MASK_R;
-    } else if (strcmp(button, "zl") == 0) {
-        _switchReport.buttons[2] &= ~SWITCH_MASK_ZL;
-    } else if (strcmp(button, "zr") == 0) {
-        _switchReport.buttons[0] &= ~SWITCH_MASK_ZR;
-    } else if (strcmp(button, "plus") == 0) {
-        _switchReport.buttons[1] &= ~SWITCH_MASK_PLUS;
-    } else if (strcmp(button, "minus") == 0) {
-        _switchReport.buttons[1] &= ~SWITCH_MASK_MINUS;
-    } else if (strcmp(button, "home") == 0) {
-        _switchReport.buttons[1] &= ~SWITCH_MASK_HOME;
-    } else if (strcmp(button, "capture") == 0) {
-        _switchReport.buttons[1] &= ~SWITCH_MASK_CAPTURE;
-    } else if (strcmp(button, "l_stick") == 0) {
-        _switchReport.buttons[1] &= ~SWITCH_MASK_L3;
-    } else if (strcmp(button, "r_stick") == 0) {
-        _switchReport.buttons[1] &= ~SWITCH_MASK_R3;
-    } else if (strcmp(button, "dpad_up") == 0 || strcmp(button, "dpad_down") == 0 ||
-               strcmp(button, "dpad_left") == 0 || strcmp(button, "dpad_right") == 0) {
-        _switchReport.buttons[2] = (_switchReport.buttons[2] & 0xF0) | SWITCH_HAT_NOTHING;
+void SwitchBluetooth::queue_stick_command(const char* stick, float h, float v) {
+    if (_queue_full) {
+        FastLogger::log("Command queue full - dropping stick command");
+        return;
+    }
+    
+    // Add stick command to queue
+    QueuedCommand& cmd = _command_queue[_queue_tail];
+    cmd.type = QueuedCommand::STICK_SET;
+    strncpy(cmd.button_name, stick, sizeof(cmd.button_name) - 1);
+    cmd.button_name[sizeof(cmd.button_name) - 1] = '\0';
+    cmd.stick_h = h;
+    cmd.stick_v = v;
+    
+    _queue_tail = (_queue_tail + 1) % MAX_QUEUE_SIZE;
+    if (_queue_tail == _queue_head) {
+        _queue_full = true;
+    }
+    
+    // If not consolidating, process immediately
+    if (!_consolidation_active) {
+        process_command_queue();
     }
 }
 
-void SwitchBluetooth::release_all_buttons() {
-    memset(_switchReport.buttons, 0, sizeof(_switchReport.buttons));
-    _switchReport.buttons[2] = SWITCH_HAT_NOTHING;
+void SwitchBluetooth::process_command_queue() {
+    bool state_changed = false;
+    int commands_processed = 0;
+    
+    // Process all queued commands
+    while (_queue_head != _queue_tail || _queue_full) {
+        QueuedCommand& cmd = _command_queue[_queue_head];
+        
+        if (cmd.type == QueuedCommand::BUTTON_PRESS || cmd.type == QueuedCommand::BUTTON_RELEASE) {
+            // Apply button command directly to report state
+            bool pressed = (cmd.type == QueuedCommand::BUTTON_PRESS);
+            set_button_direct(cmd.button_name, pressed);
+            state_changed = true;
+            commands_processed++;
+        } else if (cmd.type == QueuedCommand::STICK_SET) {
+            // Apply stick command directly to report state
+            set_stick_direct(cmd.button_name, cmd.stick_h, cmd.stick_v);
+            state_changed = true;
+            commands_processed++;
+        }
+        
+        _queue_head = (_queue_head + 1) % MAX_QUEUE_SIZE;
+        _queue_full = false;
+    }
+    
+    // Log consolidation for debugging
+    if (commands_processed > 1) {
+        FastLogger::log_fmt("Consolidated %d commands into single frame", commands_processed);
+    }
+    
+    // Only mark for transmission if state actually changed
+    if (state_changed) {
+        _pending_report_update = true;
+    }
+}
+
+bool SwitchBluetooth::has_queued_commands() {
+    return (_queue_head != _queue_tail) || _queue_full;
+}
+
+// Optimized button control method with command queuing
+void SwitchBluetooth::set_button(const char* button, bool pressed) {
+    // Queue the command for frame consolidation
+    queue_button_command(button, pressed);
+}
+
+// Direct button state modification (used by queue processor)
+void SwitchBluetooth::set_button_direct(const char* button, bool pressed) {
+    
+    // Use a hash-like approach with first character for faster lookup
+    switch (button[0]) {
+        case 'a':
+            if (button[1] == '\0') { // "a"
+                if (pressed) _switchReport.buttons[0] |= SWITCH_MASK_A;
+                else _switchReport.buttons[0] &= ~SWITCH_MASK_A;
+            }
+            break;
+        case 'b':
+            if (button[1] == '\0') { // "b"
+                if (pressed) _switchReport.buttons[0] |= SWITCH_MASK_B;
+                else _switchReport.buttons[0] &= ~SWITCH_MASK_B;
+            }
+            break;
+        case 'x':
+            if (button[1] == '\0') { // "x"
+                if (pressed) _switchReport.buttons[0] |= SWITCH_MASK_X;
+                else _switchReport.buttons[0] &= ~SWITCH_MASK_X;
+            }
+            break;
+        case 'y':
+            if (button[1] == '\0') { // "y"
+                if (pressed) _switchReport.buttons[0] |= SWITCH_MASK_Y;
+                else _switchReport.buttons[0] &= ~SWITCH_MASK_Y;
+            }
+            break;
+        case 'l':
+            if (button[1] == '\0') { // "l"
+                if (pressed) _switchReport.buttons[2] |= SWITCH_MASK_L;
+                else _switchReport.buttons[2] &= ~SWITCH_MASK_L;
+            } else if (button[1] == '_' && button[2] == 's') { // "l_stick"
+                if (pressed) _switchReport.buttons[1] |= SWITCH_MASK_L3;
+                else _switchReport.buttons[1] &= ~SWITCH_MASK_L3;
+            }
+            break;
+        case 'r':
+            if (button[1] == '\0') { // "r"
+                if (pressed) _switchReport.buttons[0] |= SWITCH_MASK_R;
+                else _switchReport.buttons[0] &= ~SWITCH_MASK_R;
+            } else if (button[1] == '_' && button[2] == 's') { // "r_stick"
+                if (pressed) _switchReport.buttons[1] |= SWITCH_MASK_R3;
+                else _switchReport.buttons[1] &= ~SWITCH_MASK_R3;
+            }
+            break;
+        case 'z':
+            if (button[1] == 'l') { // "zl"
+                if (pressed) _switchReport.buttons[2] |= SWITCH_MASK_ZL;
+                else _switchReport.buttons[2] &= ~SWITCH_MASK_ZL;
+            } else if (button[1] == 'r') { // "zr"
+                if (pressed) _switchReport.buttons[0] |= SWITCH_MASK_ZR;
+                else _switchReport.buttons[0] &= ~SWITCH_MASK_ZR;
+            }
+            break;
+        case 'p':
+            if (button[1] == 'l') { // "plus"
+                if (pressed) _switchReport.buttons[1] |= SWITCH_MASK_PLUS;
+                else _switchReport.buttons[1] &= ~SWITCH_MASK_PLUS;
+            }
+            break;
+        case 'm':
+            if (button[1] == 'i') { // "minus"
+                if (pressed) _switchReport.buttons[1] |= SWITCH_MASK_MINUS;
+                else _switchReport.buttons[1] &= ~SWITCH_MASK_MINUS;
+            }
+            break;
+        case 'h':
+            if (button[1] == 'o') { // "home"
+                if (pressed) _switchReport.buttons[1] |= SWITCH_MASK_HOME;
+                else _switchReport.buttons[1] &= ~SWITCH_MASK_HOME;
+            }
+            break;
+        case 'c':
+            if (button[1] == 'a') { // "capture"
+                if (pressed) _switchReport.buttons[1] |= SWITCH_MASK_CAPTURE;
+                else _switchReport.buttons[1] &= ~SWITCH_MASK_CAPTURE;
+            }
+            break;
+        case 'd':
+            if (pressed) {
+                if (button[5] == 'u') { // "dpad_up"
+                    _switchReport.buttons[2] = (_switchReport.buttons[2] & 0xF0) | SWITCH_HAT_UP;
+                } else if (button[5] == 'd') { // "dpad_down"
+                    _switchReport.buttons[2] = (_switchReport.buttons[2] & 0xF0) | SWITCH_HAT_DOWN;
+                } else if (button[5] == 'l') { // "dpad_left"
+                    _switchReport.buttons[2] = (_switchReport.buttons[2] & 0xF0) | SWITCH_HAT_LEFT;
+                } else if (button[5] == 'r') { // "dpad_right"
+                    _switchReport.buttons[2] = (_switchReport.buttons[2] & 0xF0) | SWITCH_HAT_RIGHT;
+                }
+            } else {
+                _switchReport.buttons[2] = (_switchReport.buttons[2] & 0xF0) | SWITCH_HAT_NOTHING;
+            }
+            break;
+    }
 }
 
 void SwitchBluetooth::set_stick(const char* stick, float h, float v) {
+    // Queue the command for frame consolidation
+    queue_stick_command(stick, h, v);
+}
+
+// Direct stick state modification (used by queue processor)
+void SwitchBluetooth::set_stick_direct(const char* stick, float h, float v) {
+    
     // Convert from [-1.0, 1.0] to [0x000, 0xFFF] range
     uint16_t h_val = (uint16_t)((h + 1.0f) * 0x7FF);
     uint16_t v_val = (uint16_t)((v + 1.0f) * 0x7FF);
@@ -141,21 +300,19 @@ void SwitchBluetooth::set_stick(const char* stick, float h, float v) {
     if (h_val > 0xFFF) h_val = 0xFFF;
     if (v_val > 0xFFF) v_val = 0xFFF;
     
-    if (strcmp(stick, "l_stick") == 0) {
+    // Optimized stick selection using first character
+    if (stick[0] == 'l') { // "l_stick"
         _switchReport.l[0] = h_val & 0xFF;
         _switchReport.l[1] = ((h_val >> 8) & 0x0F) | ((v_val & 0x0F) << 4);
         _switchReport.l[2] = (v_val >> 4) & 0xFF;
-    } else if (strcmp(stick, "r_stick") == 0) {
+    } else if (stick[0] == 'r') { // "r_stick"
         _switchReport.r[0] = h_val & 0xFF;
         _switchReport.r[1] = ((h_val >> 8) & 0x0F) | ((v_val & 0x0F) << 4);
         _switchReport.r[2] = (v_val >> 4) & 0xFF;
     }
 }
 
-void SwitchBluetooth::center_sticks() {
-    set_stick("l_stick", 0.0f, 0.0f);
-    set_stick("r_stick", 0.0f, 0.0f);
-}
+
 
 // Implementation of SwitchCommon methods
 void SwitchBluetooth::setSwitchRequestReport(uint8_t *report, int report_size) {
@@ -433,51 +590,59 @@ void SwitchBluetooth::set_controller_rumble(bool rumble) {
 }
 
 void packet_handler(SwitchBluetooth *inst, uint8_t packet_type, uint8_t *packet) {
-  uint8_t status;
-  if (packet_type != HCI_EVENT_PACKET) {
-    return;
+  if (packet_type != HCI_EVENT_PACKET || packet[0] != HCI_EVENT_HID_META) {
+    return; // Fast exit for irrelevant packets
   }
-  switch (packet[0]) {
-    case HCI_EVENT_HID_META:
-      switch (hci_event_hid_meta_get_subevent_code(packet)) {
-        case HID_SUBEVENT_CONNECTION_OPENED:
-          status = hid_subevent_connection_opened_get_status(packet);
-          if (status) {
-            inst->setHidCid(0);
-            return;
-          }
+  
+  uint8_t subevent = hci_event_hid_meta_get_subevent_code(packet);
+  
+  switch (subevent) {
+    case HID_SUBEVENT_CONNECTION_OPENED:
+      {
+        uint8_t status = hid_subevent_connection_opened_get_status(packet);
+        if (status) {
+          FastLogger::log("Connection failed");
+          inst->setHidCid(0);
+        } else {
+          FastLogger::log("Switch connected - ready for commands");
           inst->setHidCid(hid_subevent_connection_opened_get_hid_cid(packet));
           hid_device_request_can_send_now_event(inst->getHidCid());
-          break;
-        case HID_SUBEVENT_CONNECTION_CLOSED:
-          inst->setHidCid(0);
-          break;
-        case HID_SUBEVENT_GET_PROTOCOL_RESPONSE:
-          break;
-        case HID_SUBEVENT_CAN_SEND_NOW:
-          try {
-            uint8_t *report = inst->generate_report();
-            hid_device_send_interrupt_message(inst->getHidCid(), report, 50);
-            inst->set_empty_switch_request_report();
-            hid_device_request_can_send_now_event(inst->getHidCid());
-          } catch (int e) {
-            hid_device_request_can_send_now_event(inst->getHidCid());
-          }
-          break;
+        }
       }
+      break;
+      
+    case HID_SUBEVENT_CONNECTION_CLOSED:
+      FastLogger::log("Switch disconnected");
+      inst->setHidCid(0);
+      break;
+      
+    case HID_SUBEVENT_CAN_SEND_NOW:
+      {
+        try {
+          // Process any remaining queued commands before generating report
+          inst->process_command_queue();
+          
+          uint8_t *report = inst->generate_report();
+          hid_device_send_interrupt_message(inst->getHidCid(), report, 50);
+          inst->set_empty_switch_request_report();
+          
+          // Mark report as sent for timing control (applies to all reports)
+          inst->mark_report_sent();
+          
+          hid_device_request_can_send_now_event(inst->getHidCid());
+        } catch (int e) {
+          hid_device_request_can_send_now_event(inst->getHidCid());
+        }
+      }
+      break;
+      
+    default:
+      // Ignore other subevent types
       break;
   }
 }
 
 void hid_report_data_callback(SwitchBluetooth *inst, uint16_t report_id, uint8_t *report, int report_size) {
-  if (report_id == 0x01 || report_id == 0x10 || report_id == 0x11) {
-    bool lValid = (report[2] & 0x03) == 0x00 && (report[5] & 0x40) == 0x40;
-    bool rValid = (report[6] & 0x03) == 0x00 && (report[9] & 0x40) == 0x40;
-    if (lValid || rValid) {
-      bool rumbling = ((lValid ? (report[5] & 0x3F) : 0x00) |
-                       (rValid ? (report[9] & 0x3F) : 0x00)) > 0x02;
-      inst->set_controller_rumble(rumbling);
-    }
-  }
+  // Skip rumble processing for performance - not needed for macro execution
   inst->setSwitchRequestReport(report, report_size);
 }
