@@ -15,6 +15,7 @@ private:
     
     // Command parsing helpers
     bool parse_press_command(const char* args);
+    bool parse_hold_command(const char* args);
     bool parse_stick_command(const char* args);
     bool parse_sleep_command(const char* args);
     bool parse_release_command(const char* args);

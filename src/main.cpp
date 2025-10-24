@@ -104,7 +104,8 @@ int main() {
   
   printf("Bluetooth stack started. Waiting for commands over USB serial...\n");
   printf("Available commands:\n");
-  printf("  PRESS <button>      - Press a button (a, b, x, y, l, r, zl, zr, plus, minus, home, capture, l_stick, r_stick, dpad_up, dpad_down, dpad_left, dpad_right)\n");
+  printf("  PRESS <button>      - Press and release a button (a, b, x, y, l, r, zl, zr, plus, minus, home, capture, l_stick, r_stick, dpad_up, dpad_down, dpad_left, dpad_right)\n");
+  printf("  HOLD <button>       - Hold a button down (without releasing)\n");
   printf("  RELEASE <button>    - Release a button\n");
   printf("  STICK <stick> <h> <v> - Set stick position (-1.0 to 1.0)\n");
   printf("  SLEEP <seconds>     - Sleep for specified duration\n");

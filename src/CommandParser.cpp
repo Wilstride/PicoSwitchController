@@ -30,6 +30,8 @@ bool CommandParser::parse_and_execute(const char* command_line) {
     // Execute command
     if (strcmp(command, "PRESS") == 0) {
         return parse_press_command(ptr);
+    } else if (strcmp(command, "HOLD") == 0) {
+        return parse_hold_command(ptr);
     } else if (strcmp(command, "RELEASE") == 0) {
         return parse_release_command(ptr);
     } else if (strcmp(command, "STICK") == 0) {
@@ -52,6 +54,17 @@ bool CommandParser::parse_press_command(const char* args) {
     char button_name[32];
     if (!parse_button_name(args, button_name, sizeof(button_name))) {
         printf("Invalid button name for PRESS command\n");
+        return false;
+    }
+    
+    _switch->press_button(button_name);
+    return true;
+}
+
+bool CommandParser::parse_hold_command(const char* args) {
+    char button_name[32];
+    if (!parse_button_name(args, button_name, sizeof(button_name))) {
+        printf("Invalid button name for HOLD command\n");
         return false;
     }
     
